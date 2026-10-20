@@ -1,0 +1,14 @@
+# Dataset and generated features: never commit (GitHub rejects files over 100 MB; Kaggle licence)
+data/
+features/
+*.parquet
+*.pkl
+
+# Trained models: generated, copied to S3 instead
+models/*
+!models/.gitkeep
+
+# Python and notebook caches
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
