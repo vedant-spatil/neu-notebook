@@ -93,7 +93,7 @@ def _progress(stage: str, started: float) -> None:
     print(f"[alerts] {stage} elapsed={time.perf_counter() - started:.0f}s peak_rss={peak_mb:.0f}MB", flush=True)
 
 
-def build_alerts(df: pd.DataFrame) -> list[Alert]:
+def build_alerts(df: pd.DataFrame, include_graph: bool = True) -> list[Alert]:
     started = time.perf_counter()
     usd = _usd(df)
     print(f"[alerts] usd rows={len(usd)} of {len(df)}", flush=True)
@@ -177,7 +177,7 @@ def build_alerts(df: pd.DataFrame) -> list[Alert]:
 
     # R5 to R7: graph groups over the USD edges.
     graph_count = 0
-    for hit in graph_hits(usd):
+    for hit in (graph_hits(usd) if include_graph else []):
         add(*hit)
         graph_count += 1
     _progress(f"R5-R7 done, {graph_count} group hits", started)

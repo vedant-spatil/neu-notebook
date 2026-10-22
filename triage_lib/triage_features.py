@@ -312,3 +312,27 @@ def run_features(csv_path: Path, out_dir: Path, horizon: int, buckets: int = BUC
     manifest["buckets"] = buckets
     write_features(frame, manifest, out_dir)
     return manifest
+
+
+def future_perturbation_diff(df: pd.DataFrame, horizon: int, cutoff_day: int) -> float:
+    """Leakage check on real data: change every transaction after `cutoff_day`, rebuild, and return the
+    largest difference in any model feature for rows with t <= cutoff_day. Must be 0.0.
+
+    Run it on a sample (for example the first few million rows), because it builds features twice.
+    The baseline column rule_score_app is excluded: it is whole-period by design (see its docstring).
+    """
+    day0 = df["ts"].min().normalize()
+    cutoff = day0 + pd.Timedelta(days=cutoff_day)
+    base, manifest = build_features(df, horizon)
+    later = df[df["ts"] >= cutoff]
+    accounts = pd.unique(pd.concat([df["from_account"], df["to_account"]], ignore_index=True))
+    changed = later.assign(amount_received=later["amount_received"] * 3, amount_paid=later["amount_paid"] * 3,
+                           to_account=accounts[np.arange(len(later)) % len(accounts)])
+    perturbed = pd.concat([df[df["ts"] < cutoff], changed], ignore_index=True)
+    alt, _ = build_features(perturbed, horizon, day0=day0)
+    cols = manifest["features"]
+    a = base[base["t"] <= cutoff_day].set_index(["acct", "t"])[cols].sort_index()
+    b = alt[alt["t"] <= cutoff_day].set_index(["acct", "t"])[cols].sort_index()
+    if not a.index.equals(b.index):
+        return float("inf")
+    return float(np.max(np.abs(a.to_numpy(float) - b.to_numpy(float)))) if len(a) else 0.0

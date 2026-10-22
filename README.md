@@ -1,64 +1,63 @@
-# Triage model training notebook
+# Triage model training (HI-Large)
 
-`train_triage_xgboost.ipynb` trains the XGBoost triage model on IBM HI-Small. It builds account-day features, splits by time (75/25 development/test, with validation as the last 20% of development), trains with early stopping, and evaluates once on the test block.
+`train_triage_xgboost.ipynb` trains and evaluates the XGBoost triage model on IBM HI-Large, with walk-forward folds. It reads features written by the Spark job (`spark/build_features_spark.py`). The notebook never builds features itself at this scale.
 
 ## Contents
 
 | Path | What it is | In git? |
 |---|---|---|
-| `train_triage_xgboost.ipynb` | The training notebook (source of truth) | yes |
-| `triage_lib/` | Copied feature, rule, training, and explanation code | yes |
-| `tests/` | Leakage, split, resume, and equality tests for `triage_lib` | yes |
-| `eval/<run>/metrics.json` | Metrics of each run | yes |
-| `data/` | `HI-Small_Trans.csv` (about 454 MiB) | **no**: stays in S3 |
-| `features/` | Feature cache (Parquet, rule pass) | no |
-| `models/<run>/model.json` | Trained model | no: copied to S3 |
+| `train_triage_xgboost.ipynb` | Training and evaluation notebook (source of truth) | yes |
+| `triage_lib/` | Feature, rule, training and explanation code (copies of `backend/app/ml`, changed for HI-Large) | yes |
+| `spark/` | Spark feature job, R1 to R4 rule module, parity check | yes |
+| `tests/` | Tests for `triage_lib` (leakage, equality, split, walk-forward) | yes |
+| `eval/<run>/walk_forward.json` | Results of a run | yes |
+| `data/`, `features_large/`, `features_manifest/`, `models/` | Local copies of S3 data and models | no |
 
 ## Data in S3
 
-The bucket is `neu-datasets`. Both datasets are already uploaded:
+Bucket `neu-datasets`:
 
-- `s3://neu-datasets/HI-Small_Trans.csv`
-- `s3://neu-datasets/SAML-D.csv` (outside test set, not used by this notebook yet)
+- `HI-Large_Trans.csv`: raw transactions (17 GB). Upload once with `aws s3 cp <file> s3://neu-datasets/ --profile <profile>`.
+- `HI-Large_Patterns.txt`: optional, for per-typology recall.
+- `features/hi_large/features/`: Spark output, partitioned by day (`t=1`, `t=2`, ...).
+- `features/hi_large/manifest/features_manifest.json`: feature list and dataset facts.
+- `triage/<run>/`: uploaded model, manifest, versions and results.
 
-To upload a new file: `aws s3 cp <file> s3://neu-datasets/`.
+## Step 1: Spark feature job (SageMaker Processing)
 
-## Run on SageMaker
+The job runs PySpark on the raw CSV and writes the features. It needs about 300 GB of volume and several cores.
 
-1. **Create a notebook instance.** Use `ml.m5.2xlarge` with a 100 GB volume. Keep internet access on, so `pip` and `git` work.
-2. **Attach an execution role** that can read and write `neu-datasets`. It needs `s3:GetObject`, `s3:PutObject`, and `s3:ListBucket` on that bucket.
-3. **Open a terminal** on the instance and clone this repo. The repo root is this `notebooks/` folder:
-   ```bash
-   git clone <your notebooks repo url> triage-notebooks
-   cd triage-notebooks
-   ```
-4. **Open `train_triage_xgboost.ipynb`** and check the kernel is Python 3.12, the same version the backend venv uses. Pandas 3 needs a recent Python.
-5. **Run all cells.** The full HI-Small run takes roughly 20 to 40 minutes for the feature build, plus training. The feature cache means an interrupted run resumes.
-6. **Stop the instance** when finished. Notebook instances bill while running.
+- Input: the raw CSV, mapped from `s3://neu-datasets/HI-Large_Trans.csv` to a local path in the container.
+- Arguments: `--input <local csv> --output <local features dir> --manifest <local manifest path> --horizon 7 --partitions <N>`.
+- Outputs: the features folder to `s3://neu-datasets/features/hi_large/features/`, and the manifest to `s3://neu-datasets/features/hi_large/manifest/`.
 
-Outputs: `models/triage_hi_small/model.json` and `eval/triage_hi_small/metrics.json`. If `UPLOAD_RESULTS` is on, both are also copied to `s3://neu-datasets/triage/triage_hi_small/`.
+Before the full run, check the output on the HI-Small sample: `spark/parity_check.py` must report `PARITY OK`. The notebook's leakage check (section 6) also has to pass before training.
 
-## Settings to check
+## Step 2: Notebook
 
-Set in the configuration cell:
+1. Open a SageMaker notebook instance (`ml.m5.2xlarge` or larger, 100 GB volume). It needs an execution role with read and write on `neu-datasets`.
+2. Clone this repo and open `notebooks/`.
+3. Check the configuration (section 2): `RUN_NAME`, `HORIZON = 7`, `TEST_DAYS = 7`, `VAL_DAYS = 7`, `FOLDS = 4`, `BUDGET = 50` (placeholder).
+4. Run all cells. Stop the instance when done.
 
-- `HORIZON = 2`: label horizon in days. HI-Small is short, so 7 would leave no test days.
-- `BUDGET = 50`: flagged account-days per day. **Placeholder** until the alert budget is confirmed.
-- `RUN_NAME`: change it for each run so outputs don't overwrite each other.
-- `S3_KEY_HI_SMALL`: change it to `HI-Large_Trans.csv` for the main model.
+Runtime is dominated by the walk-forward grid (12 points for each of 4 folds, plus the final retrain). Plan for hours, not minutes.
 
-## Scope of the HI-Small results
+## Reading the results
 
-HI-Small is a pipeline check. Its activity falls mostly on days 1 to 10, so the test block is about four days. Don't use these numbers as the model's result. The real evaluation runs on HI-Large.
+- Each block reports the test positives. A block with fewer than 200 positives is not conclusive.
+- The baseline is the app rule score restricted to R1 to R4. R5 to R7 need the whole edge set, which the Spark job does not compute.
+- The validation PR-AUC uses sampled negatives. It is used to compare grid points, not as a precision estimate.
+- The final row (`final`) is the result. The folds show whether it is stable.
 
 ## Tests
 
-From this folder, with the backend venv:
+From `notebooks/`, with the backend venv:
 
 ```bash
 /path/to/backend/mainvenv/bin/python -m pytest -q tests
 ```
 
-## Keeping the copy in sync
+## Limits
 
-`triage_lib/` is a copy of `backend/app/ml/triage_features.py` and `triage_train.py`, plus the `alerts.py` and `graph_rules.py` they depend on. This notebook is the source of truth for training. Changes to the feature logic should be made here first.
+- HI-Large is synthetic, from the same generator as HI-Small. Real results will be lower.
+- The budget (50 flagged account-days per day) is a placeholder until investigator capacity is known.

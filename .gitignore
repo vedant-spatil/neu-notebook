@@ -12,3 +12,7 @@ models/*
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+sagemaker_work/
+features_large/
+features_manifest/
+features_large/
