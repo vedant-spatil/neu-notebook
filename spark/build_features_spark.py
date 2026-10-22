@@ -98,7 +98,7 @@ def main() -> None:
              .config("spark.sql.session.timeZone", "UTC")
              .config("spark.sql.shuffle.partitions", args.partitions)
              .getOrCreate())
-    spark.sparkContext.addPyFile(str(Path(__file__).with_name("rules_r1_r4.py")))
+    # rules_r1_r4.py is shipped by spark-submit --py-files (see the SageMaker notebooks), so no addPyFile here.
 
     txn = read_transactions(spark, args.input)
     day0 = txn.agg(F.min(F.to_date("ts"))).first()[0]
