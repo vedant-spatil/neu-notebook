@@ -14,5 +14,5 @@ __pycache__/
 .ipynb_checkpoints/
 sagemaker_work/
 features_large/
+features_small/
 features_manifest/
-features_large/
