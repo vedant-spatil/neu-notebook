@@ -60,22 +60,20 @@ print(f"walk-forward finished in {(time.time() - t0) / 60:.1f} min")
 print("selected params:", result["selected_params"])
 print("plans (test blocks):", [(p["name"], p["test_start"], p["test_end"]) for p in result["plans"]])
 
-pooled = {"model": {"tp": 0, "fp": 0, "positives": 0}, "rules": {"tp": 0, "fp": 0, "positives": 0}}
-for block in result["folds"] + [result["final"]]:
-    m, r = block["model"], block["rules_app"]
-    pooled["model"]["tp"] += m["tp"]
-    pooled["model"]["fp"] += m["fp"]
-    pooled["model"]["positives"] += m["positives"]
-    pooled["rules"]["tp"] += r["tp"]
-    pooled["rules"]["fp"] += r["fp"]
-    pooled["rules"]["positives"] += r["positives"]
-    print(f"{block['name']}: model tp={m['tp']} of {m['positives']} lift={m['lift']} | "
-          f"rules tp={r['tp']} of {r['positives']} lift={r['lift']} | conclusive={block['conclusive']}")
-for key in ("model", "rules"):
-    p = pooled[key]
-    flagged = p["tp"] + p["fp"]
-    print(f"POOLED {key}: tp={p['tp']} of {p['positives']} positives, flagged={flagged}, "
-          f"precision={p['tp'] / max(flagged, 1):.4f}")
+blocks = result["folds"] + [result["final"]]
+for block in blocks:
+    m, r = block["model_at_rate"], block["rules_at_rate"]
+    print(f"{block['name']}: rate={block['chosen_rate']} model tp={m['tp']} fp={m['fp']} of {m['positives']} "
+          f"f1={m['f1']} | rules f1={r['f1']} | conclusive={block['conclusive']}")
+print("rate grid on validation (final block's probe):", [(g["rate"], g["f1"]) for g in result["final"]["rate_grid_val"]])
+for key in ("model_at_rate", "rules_at_rate"):
+    tp = sum(b[key]["tp"] for b in blocks)
+    fp = sum(b[key]["fp"] for b in blocks)
+    fn = sum(b[key]["fn"] for b in blocks)
+    precision = tp / max(tp + fp, 1)
+    recall = tp / max(tp + fn, 1)
+    f1 = 2 * tp / max(2 * tp + fp + fn, 1)
+    print(f"POOLED {key}: tp={tp} fp={fp} fn={fn} precision={precision:.4f} recall={recall:.4f} f1={f1:.4f}")
 print("summary across folds:", result["summary"])
 print("final block:", result["final"]["name"], "conclusive:", result["final"]["conclusive"])
 

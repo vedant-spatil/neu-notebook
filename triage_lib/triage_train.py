@@ -41,6 +41,8 @@ MIN_CONCLUSIVE_POSITIVES = 200  # a test block with fewer positives is reported 
 VAL_NEG_RATIO = 100  # validation keeps all positives and ~100 negatives per positive (early stopping only)
 GRID = [{"max_depth": d, "eta": e, "min_child_weight": m} for d, e, m in product((4, 6, 8), (0.05, 0.1), (1, 5))]
 GRID_KEYS = ["max_depth", "eta", "min_child_weight"]
+# Flag rates tried on validation: share of each day's account-days flagged. 0.00016 is 50 a day on 313k rows.
+RATE_GRID = (0.0001, 0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.02)
 BASE_PARAMS = {
     "objective": "binary:logistic",
     "eval_metric": "aucpr",
@@ -145,29 +147,66 @@ def flag_top(df: pd.DataFrame, score_col: str, budget: int, seed: int = TIE_SEED
     return pd.Series(rank < budget, index=order.index).reindex(df.index)
 
 
-def budget_metrics(df: pd.DataFrame, score_col: str, budget: int, seed: int = TIE_SEED) -> dict[str, Any]:
-    flagged = flag_top(df, score_col, budget, seed).to_numpy()
+def flag_rate(df: pd.DataFrame, score_col: str, rate: float, seed: int = TIE_SEED) -> pd.Series:
+    """True for the top `rate` share of each day's rows (at least one row a day). Ties are broken by a seeded random key.
+    A rate scales with the population, so the same setting gives the same analyst workload on any data size."""
+    tie = np.random.default_rng(seed).random(len(df))
+    order = df.assign(_tie=tie).sort_values(["t", score_col, "_tie"], ascending=[True, False, True],
+                                            kind="mergesort")
+    rank = order.groupby("t").cumcount().to_numpy()
+    day_size = order.groupby("t")["t"].transform("size").to_numpy()
+    per_day = np.maximum(1, np.ceil(rate * day_size)).astype(np.int64)
+    return pd.Series(rank < per_day, index=order.index).reindex(df.index)
+
+
+def _summarise(df: pd.DataFrame, score_col: str, flagged: np.ndarray) -> dict[str, Any]:
     y = df["y"].to_numpy()
     tp = int((flagged & (y == 1)).sum())
     fp = int((flagged & (y == 0)).sum())
     positives = int(y.sum())
     fn = positives - tp
     precision = tp / (tp + fp) if tp + fp else 0.0
+    recall = tp / positives if positives else 0.0
+    f1 = 2 * tp / (2 * tp + fp + fn) if (2 * tp + fp + fn) else 0.0
     base_rate = positives / len(y) if len(y) else 0.0
     return {
-        "budget_per_day": budget,
-        "days": int(df["t"].nunique()),
         "flagged": int(flagged.sum()),
         "tp": tp,
         "fp": fp,
         "fn": fn,
         "positives": positives,
-        "precision_at_budget": round(precision, 5),
-        "recall_at_budget": round(tp / positives, 5) if positives else 0.0,
+        "precision": round(precision, 5),
+        "recall": round(recall, 5),
+        "f1": round(f1, 5),
         "base_rate": round(base_rate, 6),
         "lift": round(precision / base_rate, 2) if base_rate else None,
         "pr_auc": round(float(average_precision_score(y, df[score_col])), 5) if positives else None,
     }
+
+
+def budget_metrics(df: pd.DataFrame, score_col: str, budget: int, seed: int = TIE_SEED) -> dict[str, Any]:
+    """Fixed count per day (the older budget view)."""
+    flagged = flag_top(df, score_col, budget, seed).to_numpy()
+    out = _summarise(df, score_col, flagged)
+    out.update({"budget_per_day": budget, "days": int(df["t"].nunique()),
+                "precision_at_budget": out["precision"], "recall_at_budget": out["recall"]})
+    return out
+
+
+def rate_metrics(df: pd.DataFrame, score_col: str, rate: float, seed: int = TIE_SEED) -> dict[str, Any]:
+    """Metrics when each day flags a share `rate` of its rows."""
+    flagged = flag_rate(df, score_col, rate, seed).to_numpy()
+    out = _summarise(df, score_col, flagged)
+    out.update({"rate": rate, "days": int(df["t"].nunique())})
+    return out
+
+
+def best_rate(val: pd.DataFrame, score_col: str, rates: tuple[float, ...] = RATE_GRID) -> tuple[float, list[dict]]:
+    """The flag rate with the best F1 on validation days. Validation must be the full (not downsampled) rows,
+    because the rate is a share of each day's population. Ties go to the smaller rate (less workload)."""
+    table = [rate_metrics(val, score_col, r) for r in rates]
+    best = max(table, key=lambda m: (m["f1"], -m["rate"]))
+    return best["rate"], table
 
 
 def predict(booster: xgb.Booster, df: pd.DataFrame, features: list[str],
@@ -273,6 +312,11 @@ def run_block(path: Path, features: list[str], horizon: int, plan: dict[str, Any
         raise ValueError(f"{plan['name']}: no positives in the validation block")
     (best_val, _params, booster), runs = fit_best(train, val, features)
     model_m, rules_m, scored = _score_test(path, plan["test_start"], plan["test_end"], features, booster, budget)
+    # The flag rate is chosen on full (not downsampled) validation days, then applied to the test days.
+    val_full = score_days(path, plan["val_start"], plan["val_end"], features, booster)
+    rate, rate_table = best_rate(val_full, "score")
+    model_rate = rate_metrics(scored, "score", rate)
+    rules_rate = rate_metrics(scored, "rule_app", rate)
     test_positives = int(scored["y"].sum())
     return {
         "name": plan["name"],
@@ -284,6 +328,10 @@ def run_block(path: Path, features: list[str], horizon: int, plan: dict[str, Any
         "val_aucpr": round(best_val, 5),
         "model": model_m,
         "rules_app": rules_m,
+        "chosen_rate": rate,
+        "rate_grid_val": rate_table,
+        "model_at_rate": model_rate,
+        "rules_at_rate": rules_rate,
         "conclusive": test_positives >= MIN_CONCLUSIVE_POSITIVES,
     }
 
@@ -302,7 +350,10 @@ def run_final(path: Path, features: list[str], plan: dict[str, Any], selected: d
     probe = xgb.train(params, dtr, num_boost_round=ROUNDS, evals=[(dva, "val")],
                       early_stopping_rounds=EARLY_STOP, verbose_eval=False)
     rounds = int(probe.best_iteration) + 1
-    del dtr, dva, train, val
+    # Rate from the probe (trained without the validation days), on full validation days.
+    val_full = score_days(path, plan["val_start"], plan["val_end"], features, probe)
+    rate, rate_table = best_rate(val_full, "score")
+    del val_full, dtr, dva, train, val
 
     dev = load_block(path, 1, plan["val_end"], neg_ratio=neg_ratio)
     ddev = xgb.DMatrix(dev[features].to_numpy(np.float32), label=dev["y"].to_numpy(), feature_names=features)
@@ -312,6 +363,8 @@ def run_final(path: Path, features: list[str], plan: dict[str, Any], selected: d
 
     model_m, rules_m, scored = _score_test(path, plan["test_start"], plan["test_end"], features, final_model,
                                           budget, iteration_range=(0, rounds))
+    model_rate = rate_metrics(scored, "score", rate)
+    rules_rate = rate_metrics(scored, "rule_app", rate)
     save_artifact(final_model, model_dir, manifest_path)
 
     typology: dict[str, Any] = {}
@@ -329,6 +382,10 @@ def run_final(path: Path, features: list[str], plan: dict[str, Any], selected: d
         "positives": {"dev": dev_pos, "test": test_positives},
         "model": model_m,
         "rules_app": rules_m,
+        "chosen_rate": rate,
+        "rate_grid_val": rate_table,
+        "model_at_rate": model_rate,
+        "rules_at_rate": rules_rate,
         "typology_recall_test": typology,
         "conclusive": test_positives >= MIN_CONCLUSIVE_POSITIVES,
     }
@@ -347,6 +404,9 @@ def summarize(folds: list[dict[str, Any]]) -> dict[str, Any]:
     for key in ("model", "rules_app"):
         out[key] = {m: _spread([f[key][m] for f in folds])
                     for m in ("precision_at_budget", "recall_at_budget", "pr_auc", "lift")}
+    out["model_at_rate"] = {m: _spread([f["model_at_rate"][m] for f in folds])
+                            for m in ("f1", "precision", "recall", "lift")}
+    out["chosen_rates"] = [f["chosen_rate"] for f in folds]
     out["fold_test_positives"] = [f["positives"]["test"] for f in folds]
     out["folds_conclusive"] = sum(bool(f["conclusive"]) for f in folds)
     return out
