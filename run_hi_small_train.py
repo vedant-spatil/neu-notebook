@@ -9,6 +9,7 @@ features.parquet + manifest, train with run_train (default 60/20/20 day split), 
 
 from pathlib import Path
 import json
+import os
 import sys
 import time
 
@@ -16,6 +17,9 @@ import boto3
 
 NB_DIR = Path.cwd()  # run from the notebooks/ folder
 sys.path.insert(0, str(NB_DIR))
+# build_alerts defaults to one worker per CPU (16 on ml.r5.4xlarge). Each forked worker copies part of the
+# full table, so parallel mode blows up memory. Serial is the safe setting for this run.
+os.environ.setdefault("TRIAGE_WORKERS", "1")
 
 from triage_lib.alerts import load_csv  # noqa: E402
 from triage_lib.triage_features import build_features, write_features  # noqa: E402
