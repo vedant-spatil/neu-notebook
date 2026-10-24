@@ -179,8 +179,14 @@ def main() -> None:
             .withColumn("nonusd_share", div(F.col("out_nonusd") + F.col("in_nonusd"), n_all)))
 
     # Rule windows for R1 to R4, one account at a time (rules_r1_r4.rule_windows).
+    # Plain RDD grouping, not applyInPandas: the SageMaker Spark image has no pyarrow, which applyInPandas needs.
     rule_src = legs.select("acct", "cp", "dir", "ts", "amount_received", "amount_paid", "fmt", "usd")
-    rules = rule_src.groupBy("acct").applyInPandas(_rules_for_account, schema=RULE_SCHEMA)
+    rule_rdd = (rule_src.rdd
+                .map(lambda r: (r["acct"], (r["acct"], r["cp"], r["dir"], r["ts"], r["amount_received"],
+                                            r["amount_paid"], r["fmt"], r["usd"])))
+                .groupByKey()
+                .flatMap(_rules_for_group))
+    rules = spark.createDataFrame(rule_rdd, schema=RULE_SCHEMA)
     rules = (rules
              .withColumn("fire_day", (F.datediff(F.to_date(F.col("first_ts") + F.expr("INTERVAL 72 HOURS")),
                                                  F.lit(day0)) + 1).cast("int"))
@@ -259,6 +265,15 @@ def _rules_for_account(pdf: pd.DataFrame) -> pd.DataFrame:
     found = rule_windows(txns)
     rows = [(a, rule, pd.Timestamp(ts).to_pydatetime(), int(n)) for (a, rule), (ts, n) in found.items() if a == acct]
     return pd.DataFrame(rows, columns=["acct", "rule", "first_ts", "windows"])
+
+
+def _rules_for_group(kv):
+    """RDD version of _rules_for_account: one account's rows in, plain tuples out."""
+    acct, values = kv
+    pdf = pd.DataFrame(list(values), columns=["acct", "cp", "dir", "ts", "amount_received", "amount_paid",
+                                              "fmt", "usd"])
+    return [(a, rule, pd.Timestamp(t).to_pydatetime(), int(n))
+            for a, rule, t, n in _rules_for_account(pdf).itertuples(index=False, name=None)]
 
 
 if __name__ == "__main__":
