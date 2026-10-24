@@ -53,9 +53,14 @@ CSV_COLUMNS = ["Timestamp", "From Bank", "from_acct", "To Bank", "to_acct", "Amo
                "Receiving Currency", "Amount Paid", "Payment Currency", "Payment Format", "Is Laundering"]
 
 
+def local_uri(path: str) -> str:
+    """On a cluster, Spark reads plain paths from HDFS. SageMaker's /opt/ml paths are local, so use file://."""
+    return f"file://{path}" if path.startswith("/") else path
+
+
 def read_transactions(spark: SparkSession, path: str) -> DataFrame:
     # The file has two columns named "Account", which Spark renames on read. Read by position instead.
-    raw = spark.read.csv(path, header=False).toDF(*CSV_COLUMNS)
+    raw = spark.read.csv(local_uri(path), header=False).toDF(*CSV_COLUMNS)
     raw = raw.filter(F.col("Timestamp") != "Timestamp")  # drop the header row
     return raw.select(
         F.to_timestamp("Timestamp", "yyyy/MM/dd HH:mm").alias("ts"),
@@ -213,9 +218,9 @@ def main() -> None:
     features = COUNT_FEATURES + DERIVED_FEATURES + fmt_cols + RULE_FEATURES
     out = grid.select("acct", "t", "t_date", *features, "rule_score_app", "y")
     # Partitioned by window day t (folders t=1, t=2, ...), so the notebook reads one day at a time.
-    out.write.mode("overwrite").partitionBy("t").parquet(args.output)
+    out.write.mode("overwrite").partitionBy("t").parquet(local_uri(args.output))
 
-    totals = spark.read.parquet(args.output).agg(F.count("*").alias("rows"), F.sum("y").alias("positives")).first()
+    totals = spark.read.parquet(local_uri(args.output)).agg(F.count("*").alias("rows"), F.sum("y").alias("positives")).first()
     manifest = {
         "day0": day0.isoformat(),
         "max_day": max_day,
