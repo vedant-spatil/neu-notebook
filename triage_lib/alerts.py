@@ -108,6 +108,12 @@ def _default_workers() -> int:
     return max(1, int(os.environ.get("TRIAGE_WORKERS", os.cpu_count() or 1)))
 
 
+def _ns(ts: pd.Series) -> np.ndarray:
+    """Timestamps as int64 nanoseconds. pandas 3 stores datetimes in microseconds, so astype('int64') alone is wrong
+    against the nanosecond window sizes H24_NS and H48_NS."""
+    return ts.to_numpy(dtype="datetime64[ns]").astype(np.int64)
+
+
 def _groups(frame: pd.DataFrame, key_col: str) -> tuple[pd.DataFrame, list[tuple[str, int, int]]]:
     """Rows sorted by ts, then grouped by key. Same order as sort_values("ts").groupby(key) in the serial code:
     the second sort is stable, so ts order holds inside each key. Returns (sorted frame, [(key, lo, hi)])."""
@@ -237,7 +243,7 @@ def build_alerts(df: pd.DataFrame, include_graph: bool = True, workers: int | No
     s, groups = _groups(cash, "from_account")
     _WORKER_DATA["r1"] = {
         "groups": groups,
-        "ts": s["ts"].astype("int64").to_numpy(),
+        "ts": _ns(s["ts"]),
         "ids": s["txn_id"].to_numpy(),
         "amt": s["amount_received"].to_numpy(float),
         "lab": s["is_laundering"].to_numpy(bool),
@@ -252,7 +258,7 @@ def build_alerts(df: pd.DataFrame, include_graph: bool = True, workers: int | No
         s, groups = _groups(usd, key_col)
         _WORKER_DATA[name] = {
             "groups": groups,
-            "ts": s["ts"].astype("int64").to_numpy(),
+            "ts": _ns(s["ts"]),
             "others": s[other_col].to_numpy(object),
             "ids": s["txn_id"].to_numpy(),
             "amt": s["amount_received"].to_numpy(float),
@@ -273,11 +279,11 @@ def build_alerts(df: pd.DataFrame, include_graph: bool = True, workers: int | No
         out_index[acct] = (lo, hi)
     _WORKER_DATA["r4"] = {
         "in_groups": in_groups,
-        "in_ts": s_in["ts"].astype("int64").to_numpy(),
+        "in_ts": _ns(s_in["ts"]),
         "in_amt": s_in["amount_received"].to_numpy(float),
         "in_ids": s_in["txn_id"].to_numpy(),
         "in_lab": s_in["is_laundering"].to_numpy(bool),
-        "out_ts": s_out["ts"].astype("int64").to_numpy(),
+        "out_ts": _ns(s_out["ts"]),
         "out_cum": out_cum,
         "out_index": out_index,
     }
