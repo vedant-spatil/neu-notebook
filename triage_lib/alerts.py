@@ -70,9 +70,14 @@ class Alert:
 
 
 def load_csv(path: str) -> pd.DataFrame:
+    # Only the columns the rules and features use. Bank names are not needed, and the three low-cardinality
+    # text columns are stored as categories, which cuts memory a lot on the full file.
     df = pd.read_csv(
         path,
-        dtype={"From Bank": str, "To Bank": str, "Account": str, "Account.1": str},
+        usecols=["Timestamp", "Account", "Account.1", "Amount Received", "Amount Paid",
+                 "Receiving Currency", "Payment Currency", "Payment Format", "Is Laundering"],
+        dtype={"Account": str, "Account.1": str, "Receiving Currency": "category",
+               "Payment Currency": "category", "Payment Format": "category"},
     )
     df = df.rename(
         columns={
@@ -249,6 +254,9 @@ def build_alerts(df: pd.DataFrame, include_graph: bool = True, workers: int | No
         "lab": s["is_laundering"].to_numpy(bool),
     }
     merge(_run(_r1_account, len(groups), workers), "R1_structuring")
+    # Drop the sorted copies as soon as the rule is merged. Worker data holds references to them, so it is cleared too.
+    _WORKER_DATA.pop("r1", None)
+    del cash, s, groups
 
     # R2 fan-out (per sender) and R3 fan-in (per receiver): distinct counterparties within 48h.
     for name, key_col, other_col, rule in (
@@ -266,6 +274,8 @@ def build_alerts(df: pd.DataFrame, include_graph: bool = True, workers: int | No
         }
         _WORKER_DATA["fan"] = name
         merge(_run(_fan_worker, len(groups), workers), rule)
+        _WORKER_DATA.pop(name, None)
+        del s, groups
         _progress(f"{rule} done", started)
 
     # R4 pass-through: in-amount, >=80% sent out within 48h after receipt.
@@ -287,7 +297,10 @@ def build_alerts(df: pd.DataFrame, include_graph: bool = True, workers: int | No
         "out_cum": out_cum,
         "out_index": out_index,
     }
+    del out_amount
     merge(_run(_r4_account, len(in_groups), workers), "R4_pass_through")
+    _WORKER_DATA.pop("r4", None)
+    del s_in, s_out, out_cum, out_index
     _progress("R4 done", started)
 
     # R5 to R7: graph groups over the USD edges (unchanged; graph_rules.py).
